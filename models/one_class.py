@@ -27,6 +27,7 @@ class OneClassModel:
         expected_sales = np.sum(self.demand(self.days) * self.probability(prices, self.days))
         return self.C - expected_sales
 
+
     def optimize(self):
         initial_prices = np.full_like(self.days, self.initial_price)
         
@@ -84,7 +85,7 @@ class OneClassModel:
 def main():
     # Example usage for OneClassModel
     params_one_class = {
-        'g': 4.95, 'd': 13, 'h': 0.117, 'a': 0.0067, 'b': 0.00291
+        'g': 4.95, 'd': 13, 'h': 0.117, 'a': 0.0067, 'b': 0.001, # 'b': 0.00291
     }
     
     one_class_model = OneClassModel(params_one_class, C=200)

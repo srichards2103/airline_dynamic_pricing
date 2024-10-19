@@ -23,12 +23,10 @@ class TwoClassModel:
         return (self.params['g_E'] * x + self.params['d_E']) * np.exp(-self.params['h_E'] * x)
     
     def probability_B(self, y, x):
-        return np.exp(-y * (self.params['a_B'] + self.params['b_B'] * x))
-    # def probability_B(self, y,x):
-    #     return 1/(1+np.exp(self.params['a_B'] - self.params['b_B'] * y))
+        return 1 / (1 + np.exp(self.params['b_B'] * y - self.params['a_B']))
     
     def probability_E(self, y, x):
-        return np.exp(-y * (self.params['a_E'] + self.params['b_E'] * x))
+        return 1 / (1 + np.exp(self.params['b_E'] * y - self.params['a_E']))
 
     def objective(self, prices):
         y_B = prices[:len(self.days)]
@@ -138,10 +136,22 @@ class TwoClassModel:
         print(f"Total Economy Tickets Sold: {result['total_sales_E']:.2f} / {self.C_E}")
         print(f"Optimal Price Ratio (Business/Economy): {result['price_ratio']:.2f}")
 
+       
+
 def main():
+    fair_price_B = 150
+    fair_price_E = 70
     params = {
-        'g_B': 10.83, 'd_B': 12.9, 'h_B': 0.2, 'a_B': 0.01, 'b_B': 0.001,
-        'g_E': 4.95, 'd_E': 13, 'h_E': 0.117, 'a_E': 0.0067, 'b_E': 0.00291
+        'g_B': 10.83,
+        'd_B': 12.9,
+        'h_B': 0.2,
+        'b_B': 0.01,
+        'a_B': 1.5,    # a_B = b_B * fair_price_B
+        'g_E': 4.95,
+        'd_E': 13,
+        'h_E': 0.117,
+        'b_E': 0.01,
+        'a_E': 0.7     # a_E = b_E * fair_price_E
     }
     
     model = TwoClassModel(params)

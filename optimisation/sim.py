@@ -46,7 +46,7 @@ def visualize_optimization_results(result, model):
 def main():
     # One-class model example
     params_one_class = {
-        'g': 4.95, 'd': 13, 'h': 0.117, 'a': 0.0067, 'b': 0.00291
+        'g': 4.95, 'd': 13, 'h': 0.117, 'a': 0.0067, 'b': 0.001
     }
     
     result_one_class, model_one_class = run_optimization('one_class', params_one_class, C=200, initial_price=200.0)
@@ -56,8 +56,8 @@ def main():
 
     # Two-class model example
     params_two_class = {
-        'g_B': 10.83, 'd_B': 12.9, 'h_B': 0.2, 'a_B': 0.01, 'b_B': 0.001,
-        'g_E': 4.95, 'd_E': 13, 'h_E': 0.117, 'a_E': 0.0067, 'b_E': 0.00291
+        'g_B': 10.83, 'd_B': 12.9, 'h_B': 0.2, 'a_B': 0.01, 'b_B': 0.0005,
+        'g_E': 4.95, 'd_E': 13, 'h_E': 0.117, 'a_E': 0.0067, 'b_E': 0.001
     }
     
     result_two_class, model_two_class = run_optimization('two_class', params_two_class, C=200, C_B=50, initial_prices_B=300.0, initial_prices_E=150.0)
