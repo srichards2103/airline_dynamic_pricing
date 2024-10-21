@@ -160,6 +160,7 @@ class TwoClassAirlineRevenueOptimizer:
         self.x_start = x_start
         self.N_simulations = N_simulations
         self.confidence_level = confidence_level
+        self.total_rev = 0
 
         # Initialize remaining capacities
         self.remaining_capacity_economy = capacity_economy
@@ -282,6 +283,9 @@ class TwoClassAirlineRevenueOptimizer:
         self.bookings_business[self.x_start - day] = bookings_bus
         self.remaining_capacity_economy -= bookings_econ
         self.remaining_capacity_business -= bookings_bus
+        
+        # Update total revenue
+        self.total_rev += bookings_econ * y_economy(day) + bookings_bus * y_business(day)
 
         # Store current prices and demands
         self.price_economy.append(y_economy(day))
@@ -317,7 +321,7 @@ class TwoClassAirlineRevenueOptimizer:
         - bookings_business: Array of bookings per day for business class.
         """
         days = np.arange(self.x_start, 0, -1)
-        return days, self.price_economy, self.price_business, self.bookings_economy, self.bookings_business
+        return days, self.price_economy, self.price_business, self.bookings_economy, self.bookings_business, self.total_rev
 
     def plot_results(self, title_suffix=""):
         """
@@ -326,7 +330,7 @@ class TwoClassAirlineRevenueOptimizer:
         Parameters:
         - title_suffix: Suffix for the plot titles.
         """
-        days, price_econ, price_bus, bookings_econ, bookings_bus = self.get_results()
+        days, price_econ, price_bus, bookings_econ, bookings_bus, total_rev = self.get_results()
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), sharex=True)
 
@@ -383,7 +387,7 @@ def main():
     optimizer.run_dynamic_optimization()
     
     # Retrieve and print results
-    days, price_econ, price_bus, bookings_econ, bookings_bus = optimizer.get_results()
+    days, price_econ, price_bus, bookings_econ, bookings_bus, total_rev = optimizer.get_results()
     print("Day\tEconomy Price\tBusiness Price\tEconomy Bookings\tBusiness Bookings")
     for i in range(len(days)):
         print(f"{days[i]:>2}\t{price_econ[i]:>13.2f}\t{price_bus[i]:>14.2f}\t{bookings_econ[i]:>16}\t{bookings_bus[i]:>17}")
@@ -394,7 +398,7 @@ def main():
     # total bookings
     print(f"economy bookings: {sum(bookings_econ)}")
     print(f"business bookings: {sum(bookings_bus)}")
-
+    print(f"total revenue: {total_rev}")
 
 if __name__ == "__main__":
     main()
