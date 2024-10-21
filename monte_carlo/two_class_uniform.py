@@ -1,24 +1,29 @@
 import numpy as np
 from scipy.optimize import minimize
+from scipy.integrate import quad
 import matplotlib.pyplot as plt
 from tqdm import tqdm  # For progress bars
 import warnings
 
-# Suppress warnings from scipy.optimize.minimize when optimization fails
+# Suppress warnings from scipy.integrate.quad when y(x) leads to underflow
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 class TwoClassAirlineRevenueOptimizer:
-    def __init__(self, params_economy, params_business, x_start):
+    def __init__(self, params_economy, params_business, capacity_economy, capacity_business, x_start):
         """
         Initializes the optimizer with parameters for economy and business classes.
 
         Parameters:
         - params_economy: Tuple containing (a, b, g, d, h) for economy class.
         - params_business: Tuple containing (a, b, g, d, h) for business class.
+        - capacity_economy: Total seats available for economy class.
+        - capacity_business: Total seats available for business class.
         - x_start: Total number of days in the selling period.
         """
         self.params_economy = params_economy  # (a, b, g, d, h)
         self.params_business = params_business  # (a, b, g, d, h)
+        self.capacity_economy = capacity_economy
+        self.capacity_business = capacity_business
         self.x_start = x_start
 
     def f(self, x, params):
@@ -50,6 +55,34 @@ class TwoClassAirlineRevenueOptimizer:
         a, b = params[0], params[1]
         return np.exp(-y * (a + b * x))
 
+    def revenue_integrand(self, x, y, params):
+        """
+        Integrand for calculating total revenue.
+
+        Parameters:
+        - x: Days left until departure.
+        - y: Price function y(x).
+        - params: Tuple containing (a, b, g, d, h).
+
+        Returns:
+        - Revenue contribution at day x.
+        """
+        return y(x) * self.f(x, params) * self.p(x, y(x), params)
+
+    def capacity_integrand(self, x, y, params):
+        """
+        Integrand for checking capacity constraints.
+
+        Parameters:
+        - x: Days left until departure.
+        - y: Price function y(x).
+        - params: Tuple containing (a, b, g, d, h).
+
+        Returns:
+        - Demand contribution at day x.
+        """
+        return self.f(x, params) * self.p(x, y(x), params)
+
     def calculate_demand(self, x, y, params):
         """
         Calculates expected demand at day x with price y.
@@ -64,53 +97,52 @@ class TwoClassAirlineRevenueOptimizer:
         """
         return self.f(x, params) * self.p(x, y, params)
 
-    def optimize_prices(self, remaining_capacity_economy, remaining_capacity_business, day):
+    def optimize_prices(self, remaining_capacity_economy, remaining_capacity_business):
         """
-        Optimizes the price structure based on the remaining capacity for the current day.
+        Optimizes the price structure based on the remaining capacity.
 
         Parameters:
         - remaining_capacity_economy: Remaining seats in economy.
         - remaining_capacity_business: Remaining seats in business.
-        - day: Current day (days left until departure).
 
         Returns:
-        - optimal_y_economy: Optimal price for economy class.
-        - optimal_y_business: Optimal price for business class.
+        - optimal_y_economy: Optimal price function for economy class.
+        - optimal_y_business: Optimal price function for business class.
         """
-        def objective(prices):
-            y_economy, y_business = prices
-            lambda_econ = self.calculate_demand(day, y_economy, self.params_economy)
-            lambda_bus = self.calculate_demand(day, y_business, self.params_business)
-            # Negative because we minimize
-            return -(y_economy * lambda_econ + y_business * lambda_bus)
+        def objective(lambdas):
+            lambda_economy, lambda_business = lambdas
+            # Define price functions with updated lambdas
+            y_economy = lambda x: 1 / (self.params_economy[0] + self.params_economy[1] * x) + lambda_economy
+            y_business = lambda x: 1 / (self.params_business[0] + self.params_business[1] * x) + lambda_business
+            return -self.total_revenue(y_economy, y_business)
 
-        def constraint_economy(prices):
-            y_economy, _ = prices
-            lambda_econ = self.calculate_demand(day, y_economy, self.params_economy)
-            return remaining_capacity_economy - lambda_econ
+        def constraint_economy(lambdas):
+            lambda_economy = lambdas[0]
+            y_economy = lambda x: 1 / (self.params_economy[0] + self.params_economy[1] * x) + lambda_economy
+            return self.capacity_constraint_economy(y_economy, remaining_capacity_economy)
 
-        def constraint_business(prices):
-            _, y_business = prices
-            lambda_bus = self.calculate_demand(day, y_business, self.params_business)
-            return remaining_capacity_business - lambda_bus
+        def constraint_business(lambdas):
+            lambda_business = lambdas[1]
+            y_business = lambda x: 1 / (self.params_business[0] + self.params_business[1] * x) + lambda_business
+            return self.capacity_constraint_business(y_business, remaining_capacity_business)
 
         constraints = (
             {'type': 'ineq', 'fun': constraint_economy},
             {'type': 'ineq', 'fun': constraint_business}
         )
 
-        # Set bounds for prices to be positive
-        bounds = [(1, None), (1, None)]  # Prices must be at least $1
+        initial_guess = [0, 0]  # Initial lambdas
 
-        # Initial guess: $70 for both classes
-        initial_guess = [70, 70]
-
-        result = minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+        result = minimize(objective, initial_guess, method='SLSQP', constraints=constraints)
 
         if not result.success:
             raise ValueError(f"Optimization failed: {result.message}")
 
-        optimal_y_economy, optimal_y_business = result.x
+        optimal_lambda_economy, optimal_lambda_business = result.x
+        # Define the optimal price functions
+        optimal_y_economy = lambda x: 1 / (self.params_economy[0] + self.params_economy[1] * x) + optimal_lambda_economy
+        optimal_y_business = lambda x: 1 / (self.params_business[0] + self.params_business[1] * x) + optimal_lambda_business
+
         return optimal_y_economy, optimal_y_business
 
     def simulate_bookings(self, y_economy, y_business, day, remaining_capacity_economy, remaining_capacity_business):
@@ -118,8 +150,8 @@ class TwoClassAirlineRevenueOptimizer:
         Simulates bookings for a given day based on current price functions.
 
         Parameters:
-        - y_economy: Current price for economy class.
-        - y_business: Current price for business class.
+        - y_economy: Current price function for economy class.
+        - y_business: Current price function for business class.
         - day: Current day (days left until departure).
         - remaining_capacity_economy: Remaining seats in economy.
         - remaining_capacity_business: Remaining seats in business.
@@ -130,9 +162,9 @@ class TwoClassAirlineRevenueOptimizer:
         - updated_remaining_capacity_economy: Updated remaining seats in economy.
         - updated_remaining_capacity_business: Updated remaining seats in business.
         """
-        # Calculate expected demand (lambda) for economy and business
-        lambda_economy = self.calculate_demand(day, y_economy, self.params_economy)
-        lambda_business = self.calculate_demand(day, y_business, self.params_business)
+        # Calculate lambda for economy and business
+        lambda_economy = self.calculate_demand(day, y_economy(day), self.params_economy)
+        lambda_business = self.calculate_demand(day, y_business(day), self.params_business)
 
         # Simulate bookings using Poisson distribution
         bookings_econ = np.random.poisson(lam=lambda_economy)
@@ -148,145 +180,97 @@ class TwoClassAirlineRevenueOptimizer:
 
         return bookings_econ, bookings_bus, updated_remaining_capacity_economy, updated_remaining_capacity_business
 
-def run_uniform_simulation(params_economy, params_business, capacity_economy, capacity_business, x_start):
-    """
-    Runs a single simulation using Uniform Pricing.
+    def total_revenue(self, y_economy, y_business):
+        """
+        Calculates total expected revenue for both classes.
 
-    Parameters:
-    - params_economy: Parameters for economy class.
-    - params_business: Parameters for business class.
-    - capacity_economy: Total seats in economy.
-    - capacity_business: Total seats in business.
-    - x_start: Total number of days in the selling period.
+        Parameters:
+        - y_economy: Price function for economy class.
+        - y_business: Price function for business class.
 
-    Returns:
-    - uniform_revenue: Total revenue from Uniform Pricing.
-    - uniform_bookings_economy: Total economy bookings from Uniform Pricing.
-    - uniform_bookings_business: Total business bookings from Uniform Pricing.
-    - uniform_bookings_economy_daily: Array of daily economy bookings from Uniform Pricing.
-    - uniform_bookings_business_daily: Array of daily business bookings from Uniform Pricing.
-    - uniform_prices_economy_daily: Array of daily economy prices from Uniform Pricing.
-    - uniform_prices_business_daily: Array of daily business prices from Uniform Pricing.
-    """
-    # Fixed price for uniform pricing
-    fixed_price_economy = 70
-    fixed_price_business = 70
+        Returns:
+        - Total expected revenue.
+        """
+        # Integration over the entire selling period is no longer needed
+        # Revenue is calculated based on actual bookings
+        # Therefore, this function is obsolete and can be removed or kept for analytical purposes
+        # Here, we'll keep it but ensure it's not used in the simulation
+        revenue_economy = quad(self.revenue_integrand, 0, self.x_start, args=(y_economy, self.params_economy))[0]
+        revenue_business = quad(self.revenue_integrand, 0, self.x_start, args=(y_business, self.params_business))[0]
+        return revenue_economy + revenue_business
 
-    remaining_capacity_economy = capacity_economy
-    remaining_capacity_business = capacity_business
+    def capacity_constraint_economy(self, y_economy, remaining_capacity):
+        """
+        Capacity constraint for economy class.
 
-    uniform_bookings_economy_daily = np.zeros(x_start, dtype=int)
-    uniform_bookings_business_daily = np.zeros(x_start, dtype=int)
-    uniform_prices_economy_daily = []
-    uniform_prices_business_daily = []
+        Parameters:
+        - y_economy: Price function for economy class.
+        - remaining_capacity: Remaining seats in economy.
 
-    uniform_revenue = 0
+        Returns:
+        - Remaining capacity minus expected bookings.
+        """
+        expected_bookings = quad(self.capacity_integrand, 0, self.x_start, args=(y_economy, self.params_economy))[0]
+        return remaining_capacity - expected_bookings
 
-    # Initialize optimizer to access demand functions
-    optimizer = TwoClassAirlineRevenueOptimizer(
-        params_economy=params_economy,
-        params_business=params_business,
-        x_start=x_start
-    )
+    def capacity_constraint_business(self, y_business, remaining_capacity):
+        """
+        Capacity constraint for business class.
 
-    for day in range(x_start, 0, -1):
-        # Set fixed prices
-        price_economy = fixed_price_economy
-        price_business = fixed_price_business
-        uniform_prices_economy_daily.append(price_economy)
-        uniform_prices_business_daily.append(price_business)
+        Parameters:
+        - y_business: Price function for business class.
+        - remaining_capacity: Remaining seats in business.
 
-        # Calculate expected demand
-        lambda_econ = optimizer.calculate_demand(day, price_economy, params_economy)
-        lambda_bus = optimizer.calculate_demand(day, price_business, params_business)
-
-        # Simulate bookings using Poisson distribution
-        bookings_econ = np.random.poisson(lam=lambda_econ)
-        bookings_bus = np.random.poisson(lam=lambda_bus)
-
-        # Ensure bookings do not exceed remaining capacity
-        bookings_econ = min(bookings_econ, remaining_capacity_economy)
-        bookings_bus = min(bookings_bus, remaining_capacity_business)
-
-        # Update remaining capacities
-        remaining_capacity_economy -= bookings_econ
-        remaining_capacity_business -= bookings_bus
-
-        # Record bookings
-        uniform_bookings_economy_daily[x_start - day] = bookings_econ
-        uniform_bookings_business_daily[x_start - day] = bookings_bus
-
-        # Accumulate revenue
-        uniform_revenue += bookings_econ * price_economy + bookings_bus * price_business
-
-        # If all seats are sold, exit early
-        if remaining_capacity_economy <= 0 and remaining_capacity_business <= 0:
-            break
-
-    uniform_bookings_economy = uniform_bookings_economy_daily.sum()
-    uniform_bookings_business = uniform_bookings_business_daily.sum()
-
-    return (
-        uniform_revenue,
-        uniform_bookings_economy,
-        uniform_bookings_business,
-        uniform_bookings_economy_daily,
-        uniform_bookings_business_daily,
-        uniform_prices_economy_daily,
-        uniform_prices_business_daily
-    )
+        Returns:
+        - Remaining capacity minus expected bookings.
+        """
+        expected_bookings = quad(self.capacity_integrand, 0, self.x_start, args=(y_business, self.params_business))[0]
+        return remaining_capacity - expected_bookings
 
 def run_single_simulation(params_economy, params_business, capacity_economy, capacity_business, x_start):
     """
-    Runs a single simulation for both Dynamic Pricing and Uniform Pricing.
+    Runs a single simulation of the airline revenue optimization.
 
     Returns:
-    - dynamic_revenue: Total revenue from Dynamic Pricing.
-    - dynamic_bookings_economy: Total economy bookings from Dynamic Pricing.
-    - dynamic_bookings_business: Total business bookings from Dynamic Pricing.
-    - dynamic_bookings_economy_daily: Array of daily economy bookings from Dynamic Pricing.
-    - dynamic_bookings_business_daily: Array of daily business bookings from Dynamic Pricing.
-    - dynamic_prices_economy_daily: Array of daily economy prices from Dynamic Pricing.
-    - dynamic_prices_business_daily: Array of daily business prices from Dynamic Pricing.
-    - uniform_revenue: Total revenue from Uniform Pricing.
-    - uniform_bookings_economy: Total economy bookings from Uniform Pricing.
-    - uniform_bookings_business: Total business bookings from Uniform Pricing.
-    - uniform_bookings_economy_daily: Array of daily economy bookings from Uniform Pricing.
-    - uniform_bookings_business_daily: Array of daily business bookings from Uniform Pricing.
-    - uniform_prices_economy_daily: Array of daily economy prices from Uniform Pricing.
-    - uniform_prices_business_daily: Array of daily business prices from Uniform Pricing.
+    - total_revenue: Total revenue from the simulation.
+    - total_bookings_economy: Total bookings for economy class.
+    - total_bookings_business: Total bookings for business class.
+    - bookings_economy: Array of daily bookings for economy class.
+    - bookings_business: Array of daily bookings for business class.
+    - prices_economy: Array of daily prices for economy class.
+    - prices_business: Array of daily prices for business class.
     """
-    # Dynamic Pricing Simulation
-    dynamic_optimizer = TwoClassAirlineRevenueOptimizer(
+    optimizer = TwoClassAirlineRevenueOptimizer(
         params_economy=params_economy,
         params_business=params_business,
+        capacity_economy=capacity_economy,
+        capacity_business=capacity_business,
         x_start=x_start
     )
 
     remaining_capacity_economy = capacity_economy
     remaining_capacity_business = capacity_business
 
-    dynamic_bookings_economy_daily = np.zeros(x_start, dtype=int)
-    dynamic_bookings_business_daily = np.zeros(x_start, dtype=int)
-    dynamic_prices_economy_daily = []
-    dynamic_prices_business_daily = []
+    bookings_economy = np.zeros(x_start, dtype=int)
+    bookings_business = np.zeros(x_start, dtype=int)
+    prices_economy = []
+    prices_business = []
 
-    dynamic_revenue = 0
+    total_revenue = 0
 
     for day in range(x_start, 0, -1):
         # Optimize prices based on current remaining capacity
         try:
-            y_economy_opt, y_business_opt = dynamic_optimizer.optimize_prices(
+            y_economy_opt, y_business_opt = optimizer.optimize_prices(
                 remaining_capacity_economy,
-                remaining_capacity_business,
-                day
+                remaining_capacity_business
             )
         except ValueError as e:
-            print(f"Dynamic Optimization failed on day {day}: {e}")
+            print(f"Optimization failed on day {day}: {e}")
             break
 
         # Simulate bookings for the current day
-        bookings_econ, bookings_bus, remaining_capacity_economy, remaining_capacity_business = dynamic_optimizer.simulate_bookings(
+        bookings_econ, bookings_bus, remaining_capacity_economy, remaining_capacity_business = optimizer.simulate_bookings(
             y_economy_opt,
             y_business_opt,
             day,
@@ -295,51 +279,113 @@ def run_single_simulation(params_economy, params_business, capacity_economy, cap
         )
 
         # Record bookings
-        dynamic_bookings_economy_daily[x_start - day] = bookings_econ
-        dynamic_bookings_business_daily[x_start - day] = bookings_bus
+        bookings_economy[x_start - day] = bookings_econ
+        bookings_business[x_start - day] = bookings_bus
 
         # Record prices
-        price_econ = y_economy_opt
-        price_bus = y_business_opt
-        dynamic_prices_economy_daily.append(price_econ)
-        dynamic_prices_business_daily.append(price_bus)
+        price_econ = y_economy_opt(day)
+        price_bus = y_business_opt(day)
+        prices_economy.append(price_econ)
+        prices_business.append(price_bus)
 
         # Accumulate revenue based on actual bookings
-        dynamic_revenue += bookings_econ * price_econ + bookings_bus * price_bus
+        revenue_today = bookings_econ * price_econ + bookings_bus * price_bus
+        total_revenue += revenue_today
 
         # If all seats are sold, exit early
         if remaining_capacity_economy <= 0 and remaining_capacity_business <= 0:
             break
 
-    dynamic_bookings_economy = dynamic_bookings_economy_daily.sum()
-    dynamic_bookings_business = dynamic_bookings_business_daily.sum()
-
-    # Uniform Pricing Simulation
-    uniform_revenue, uniform_bookings_economy, uniform_bookings_business, \
-    uniform_bookings_economy_daily, uniform_bookings_business_daily, \
-    uniform_prices_economy_daily, uniform_prices_business_daily = run_uniform_simulation(
-        params_economy,
-        params_business,
-        capacity_economy,
-        capacity_business,
-        x_start
-    )
+    total_bookings_economy = bookings_economy.sum()
+    total_bookings_business = bookings_business.sum()
 
     return (
-        dynamic_revenue,
-        dynamic_bookings_economy,
-        dynamic_bookings_business,
-        dynamic_bookings_economy_daily,
-        dynamic_bookings_business_daily,
-        dynamic_prices_economy_daily,
-        dynamic_prices_business_daily,
-        uniform_revenue,
-        uniform_bookings_economy,
-        uniform_bookings_business,
-        uniform_bookings_economy_daily,
-        uniform_bookings_business_daily,
-        uniform_prices_economy_daily,
-        uniform_prices_business_daily
+        total_revenue,
+        total_bookings_economy,
+        total_bookings_business,
+        bookings_economy,
+        bookings_business,
+        prices_economy,
+        prices_business
+    )
+
+def run_single_simulation_uniform_pricing(params_economy, params_business, capacity_economy, capacity_business, x_start, price_economy_fixed, price_business_fixed):
+    """
+    Runs a single simulation of the airline revenue under uniform pricing.
+
+    Returns:
+    - total_revenue: Total revenue from the simulation.
+    - total_bookings_economy: Total bookings for economy class.
+    - total_bookings_business: Total bookings for business class.
+    - bookings_economy: Array of daily bookings for economy class.
+    - bookings_business: Array of daily bookings for business class.
+    """
+    optimizer = TwoClassAirlineRevenueOptimizer(
+        params_economy=params_economy,
+        params_business=params_business,
+        capacity_economy=capacity_economy,
+        capacity_business=capacity_business,
+        x_start=x_start
+    )
+
+    remaining_capacity_economy = capacity_economy
+    remaining_capacity_business = capacity_business
+
+    bookings_economy = np.zeros(x_start, dtype=int)
+    bookings_business = np.zeros(x_start, dtype=int)
+    prices_economy = []
+    prices_business = []
+
+    total_revenue = 0
+
+    for day in range(x_start, 0, -1):
+        # Use fixed prices
+        price_econ = price_economy_fixed
+        price_bus = price_business_fixed
+
+        # Calculate expected demand
+        lambda_economy = optimizer.calculate_demand(day, price_econ, optimizer.params_economy)
+        lambda_business = optimizer.calculate_demand(day, price_bus, optimizer.params_business)
+
+        # Simulate bookings using Poisson distribution
+        bookings_econ = np.random.poisson(lam=lambda_economy)
+        bookings_bus = np.random.poisson(lam=lambda_business)
+
+        # Ensure bookings do not exceed remaining capacity
+        bookings_econ = min(bookings_econ, remaining_capacity_economy)
+        bookings_bus = min(bookings_bus, remaining_capacity_business)
+
+        # Record bookings
+        bookings_economy[x_start - day] = bookings_econ
+        bookings_business[x_start - day] = bookings_bus
+
+        # Record prices
+        prices_economy.append(price_econ)
+        prices_business.append(price_bus)
+
+        # Accumulate revenue
+        revenue_today = bookings_econ * price_econ + bookings_bus * price_bus
+        total_revenue += revenue_today
+
+        # Update remaining capacities
+        remaining_capacity_economy -= bookings_econ
+        remaining_capacity_business -= bookings_bus
+
+        # If all seats are sold, exit early
+        if remaining_capacity_economy <= 0 and remaining_capacity_business <= 0:
+            break
+
+    total_bookings_economy = bookings_economy.sum()
+    total_bookings_business = bookings_business.sum()
+
+    return (
+        total_revenue,
+        total_bookings_economy,
+        total_bookings_business,
+        bookings_economy,
+        bookings_business,
+        prices_economy,
+        prices_business
     )
 
 def run_monte_carlo_simulations(
@@ -351,56 +397,34 @@ def run_monte_carlo_simulations(
     x_start
 ):
     """
-    Runs multiple simulations and collects results for both Dynamic and Uniform Pricing.
+    Runs multiple simulations and collects results.
 
     Returns:
-    - dynamic_revenues: List of total revenues from Dynamic Pricing.
-    - dynamic_bookings_econ_list: List of total economy bookings from Dynamic Pricing.
-    - dynamic_bookings_bus_list: List of total business bookings from Dynamic Pricing.
-    - dynamic_bookings_economy_daily_all: List of daily economy bookings arrays from Dynamic Pricing.
-    - dynamic_bookings_business_daily_all: List of daily business bookings arrays from Dynamic Pricing.
-    - dynamic_prices_economy_daily_all: List of daily economy prices arrays from Dynamic Pricing.
-    - dynamic_prices_business_daily_all: List of daily business prices arrays from Dynamic Pricing.
-    - uniform_revenues: List of total revenues from Uniform Pricing.
-    - uniform_bookings_econ_list: List of total economy bookings from Uniform Pricing.
-    - uniform_bookings_bus_list: List of total business bookings from Uniform Pricing.
-    - uniform_bookings_economy_daily_all: List of daily economy bookings arrays from Uniform Pricing.
-    - uniform_bookings_business_daily_all: List of daily business bookings arrays from Uniform Pricing.
-    - uniform_prices_economy_daily_all: List of daily economy prices arrays from Uniform Pricing.
-    - uniform_prices_business_daily_all: List of daily business prices arrays from Uniform Pricing.
+    - revenues: List of total revenues from each simulation.
+    - bookings_econ_list: List of total economy bookings from each simulation.
+    - bookings_bus_list: List of total business bookings from each simulation.
+    - all_bookings_economy: List of daily economy bookings arrays.
+    - all_bookings_business: List of daily business bookings arrays.
+    - all_prices_economy: List of daily economy prices arrays.
+    - all_prices_business: List of daily business prices arrays.
     """
-    dynamic_revenues = []
-    dynamic_bookings_econ_list = []
-    dynamic_bookings_bus_list = []
-    dynamic_bookings_economy_daily_all = []
-    dynamic_bookings_business_daily_all = []
-    dynamic_prices_economy_daily_all = []
-    dynamic_prices_business_daily_all = []
+    revenues = []
+    bookings_econ_list = []
+    bookings_bus_list = []
+    all_bookings_economy = []
+    all_bookings_business = []
+    all_prices_economy = []
+    all_prices_business = []
 
-    uniform_revenues = []
-    uniform_bookings_econ_list = []
-    uniform_bookings_bus_list = []
-    uniform_bookings_economy_daily_all = []
-    uniform_bookings_business_daily_all = []
-    uniform_prices_economy_daily_all = []
-    uniform_prices_business_daily_all = []
-
-    for _ in tqdm(range(num_simulations), desc="Running Simulations"):
+    for _ in tqdm(range(num_simulations), desc="Running Dynamic Pricing Simulations"):
         (
-            dynamic_revenue,
-            dynamic_bookings_economy,
-            dynamic_bookings_business,
-            dynamic_bookings_economy_daily,
-            dynamic_bookings_business_daily,
-            dynamic_prices_economy_daily,
-            dynamic_prices_business_daily,
-            uniform_revenue,
-            uniform_bookings_economy,
-            uniform_bookings_business,
-            uniform_bookings_economy_daily,
-            uniform_bookings_business_daily,
-            uniform_prices_economy_daily,
-            uniform_prices_business_daily
+            total_revenue,
+            total_bookings_economy,
+            total_bookings_business,
+            bookings_economy,
+            bookings_business,
+            prices_economy,
+            prices_business
         ) = run_single_simulation(
             params_economy,
             params_business,
@@ -409,170 +433,211 @@ def run_monte_carlo_simulations(
             x_start
         )
 
-        dynamic_revenues.append(dynamic_revenue)
-        dynamic_bookings_econ_list.append(dynamic_bookings_economy)
-        dynamic_bookings_bus_list.append(dynamic_bookings_business)
-        dynamic_bookings_economy_daily_all.append(dynamic_bookings_economy_daily)
-        dynamic_bookings_business_daily_all.append(dynamic_bookings_business_daily)
-        dynamic_prices_economy_daily_all.append(dynamic_prices_economy_daily)
-        dynamic_prices_business_daily_all.append(dynamic_prices_business_daily)
-
-        uniform_revenues.append(uniform_revenue)
-        uniform_bookings_econ_list.append(uniform_bookings_economy)
-        uniform_bookings_bus_list.append(uniform_bookings_business)
-        uniform_bookings_economy_daily_all.append(uniform_bookings_economy_daily)
-        uniform_bookings_business_daily_all.append(uniform_bookings_business_daily)
-        uniform_prices_economy_daily_all.append(uniform_prices_economy_daily)
-        uniform_prices_business_daily_all.append(uniform_prices_business_daily)
+        revenues.append(total_revenue)
+        bookings_econ_list.append(total_bookings_economy)
+        bookings_bus_list.append(total_bookings_business)
+        all_bookings_economy.append(bookings_economy)
+        all_bookings_business.append(bookings_business)
+        all_prices_economy.append(prices_economy)
+        all_prices_business.append(prices_business)
 
     return (
-        dynamic_revenues,
-        dynamic_bookings_econ_list,
-        dynamic_bookings_bus_list,
-        dynamic_bookings_economy_daily_all,
-        dynamic_bookings_business_daily_all,
-        dynamic_prices_economy_daily_all,
-        dynamic_prices_business_daily_all,
-        uniform_revenues,
-        uniform_bookings_econ_list,
-        uniform_bookings_bus_list,
-        uniform_bookings_economy_daily_all,
-        uniform_bookings_business_daily_all,
-        uniform_prices_economy_daily_all,
-        uniform_prices_business_daily_all
+        revenues,
+        bookings_econ_list,
+        bookings_bus_list,
+        all_bookings_economy,
+        all_bookings_business,
+        all_prices_economy,
+        all_prices_business
     )
 
-def plot_monte_carlo_results(
-    dynamic_revenues,
-    dynamic_bookings_econ_list,
-    dynamic_bookings_bus_list,
-    dynamic_bookings_economy_daily_all,
-    dynamic_bookings_business_daily_all,
-    dynamic_prices_economy_daily_all,
-    dynamic_prices_business_daily_all,
-    uniform_revenues,
-    uniform_bookings_econ_list,
-    uniform_bookings_bus_list,
-    uniform_bookings_economy_daily_all,
-    uniform_bookings_business_daily_all,
-    uniform_prices_economy_daily_all,
-    uniform_prices_business_daily_all,
+def run_monte_carlo_simulations_uniform_pricing(
+    num_simulations,
+    params_economy,
+    params_business,
+    capacity_economy,
+    capacity_business,
+    x_start,
+    price_economy_fixed,
+    price_business_fixed
+):
+    """
+    Runs multiple simulations under uniform pricing and collects results.
+
+    Returns:
+    - revenues: List of total revenues from each simulation.
+    - bookings_econ_list: List of total economy bookings from each simulation.
+    - bookings_bus_list: List of total business bookings from each simulation.
+    - all_bookings_economy: List of daily economy bookings arrays.
+    - all_bookings_business: List of daily business bookings arrays.
+    - all_prices_economy: List of daily economy prices arrays.
+    - all_prices_business: List of daily business prices arrays.
+    """
+    revenues = []
+    bookings_econ_list = []
+    bookings_bus_list = []
+    all_bookings_economy = []
+    all_bookings_business = []
+    all_prices_economy = []
+    all_prices_business = []
+
+    for _ in tqdm(range(num_simulations), desc="Running Uniform Pricing Simulations"):
+        (
+            total_revenue,
+            total_bookings_economy,
+            total_bookings_business,
+            bookings_economy,
+            bookings_business,
+            prices_economy,
+            prices_business
+        ) = run_single_simulation_uniform_pricing(
+            params_economy,
+            params_business,
+            capacity_economy,
+            capacity_business,
+            x_start,
+            price_economy_fixed,
+            price_business_fixed
+        )
+
+        revenues.append(total_revenue)
+        bookings_econ_list.append(total_bookings_economy)
+        bookings_bus_list.append(total_bookings_business)
+        all_bookings_economy.append(bookings_economy)
+        all_bookings_business.append(bookings_business)
+        all_prices_economy.append(prices_economy)
+        all_prices_business.append(prices_business)
+
+    return (
+        revenues,
+        bookings_econ_list,
+        bookings_bus_list,
+        all_bookings_economy,
+        all_bookings_business,
+        all_prices_economy,
+        all_prices_business
+    )
+
+def plot_comparison_results(
+    revenues_dynamic,
+    revenues_uniform,
+    bookings_econ_list_dynamic,
+    bookings_econ_list_uniform,
+    bookings_bus_list_dynamic,
+    bookings_bus_list_uniform,
+    all_bookings_economy_dynamic,
+    all_bookings_economy_uniform,
+    all_bookings_business_dynamic,
+    all_bookings_business_uniform,
+    all_prices_economy_dynamic,
+    all_prices_economy_uniform,
+    all_prices_business_dynamic,
+    all_prices_business_uniform,
     x_start,
     num_simulations
 ):
     """
-    Generates Monte Carlo plots based on simulation results for both Dynamic and Uniform Pricing.
+    Plots the comparison results between dynamic and uniform pricing strategies.
     """
     # Histogram of Total Revenues
     plt.figure(figsize=(14, 6))
-    plt.hist(dynamic_revenues, bins=50, alpha=0.7, label='Dynamic Pricing', color='green')
-    plt.hist(uniform_revenues, bins=50, alpha=0.7, label='Uniform Pricing', color='orange')
-    plt.axvline(np.mean(dynamic_revenues), color='darkgreen', linestyle='dashed', linewidth=1, label=f"Dynamic Mean: ${np.mean(dynamic_revenues):.2f}")
-    plt.axvline(np.mean(uniform_revenues), color='darkorange', linestyle='dashed', linewidth=1, label=f"Uniform Mean: ${np.mean(uniform_revenues):.2f}")
-    plt.title('Monte Carlo Simulation of Total Revenues')
+    plt.hist(revenues_dynamic, bins=50, color='green', alpha=0.7, label='Dynamic Pricing')
+    plt.hist(revenues_uniform, bins=50, color='blue', alpha=0.7, label='Uniform Pricing')
+    plt.axvline(np.mean(revenues_dynamic), color='green', linestyle='dashed', linewidth=1, label=f"Mean Dynamic: ${np.mean(revenues_dynamic):.2f}")
+    plt.axvline(np.mean(revenues_uniform), color='blue', linestyle='dashed', linewidth=1, label=f"Mean Uniform: ${np.mean(revenues_uniform):.2f}")
+    plt.title('Comparison of Total Revenues')
     plt.xlabel('Total Revenue ($)')
     plt.ylabel('Frequency')
     plt.legend()
     plt.grid(True)
     plt.show()
-
+    
     # Histogram of Total Bookings - Economy
     plt.figure(figsize=(14, 6))
-    plt.hist(dynamic_bookings_econ_list, bins=50, alpha=0.7, label='Dynamic Pricing', color='blue')
-    plt.hist(uniform_bookings_econ_list, bins=50, alpha=0.7, label='Uniform Pricing', color='skyblue')
-    plt.axvline(np.mean(dynamic_bookings_econ_list), color='darkblue', linestyle='dashed', linewidth=1, label=f"Dynamic Mean: {np.mean(dynamic_bookings_econ_list):.2f}")
-    plt.axvline(np.mean(uniform_bookings_econ_list), color='deepskyblue', linestyle='dashed', linewidth=1, label=f"Uniform Mean: {np.mean(uniform_bookings_econ_list):.2f}")
-    plt.title('Monte Carlo Simulation of Total Economy Bookings')
+    plt.hist(bookings_econ_list_dynamic, bins=50, color='green', alpha=0.7, label='Dynamic Pricing')
+    plt.hist(bookings_econ_list_uniform, bins=50, color='blue', alpha=0.7, label='Uniform Pricing')
+    plt.axvline(np.mean(bookings_econ_list_dynamic), color='green', linestyle='dashed', linewidth=1, label=f"Mean Dynamic: {np.mean(bookings_econ_list_dynamic):.2f}")
+    plt.axvline(np.mean(bookings_econ_list_uniform), color='blue', linestyle='dashed', linewidth=1, label=f"Mean Uniform: {np.mean(bookings_econ_list_uniform):.2f}")
+    plt.title('Comparison of Total Economy Bookings')
     plt.xlabel('Total Economy Bookings')
     plt.ylabel('Frequency')
     plt.legend()
     plt.grid(True)
     plt.show()
-
+    
     # Histogram of Total Bookings - Business
     plt.figure(figsize=(14, 6))
-    plt.hist(dynamic_bookings_bus_list, bins=50, alpha=0.7, label='Dynamic Pricing', color='red')
-    plt.hist(uniform_bookings_bus_list, bins=50, alpha=0.7, label='Uniform Pricing', color='salmon')
-    plt.axvline(np.mean(dynamic_bookings_bus_list), color='darkred', linestyle='dashed', linewidth=1, label=f"Dynamic Mean: {np.mean(dynamic_bookings_bus_list):.2f}")
-    plt.axvline(np.mean(uniform_bookings_bus_list), color='lightcoral', linestyle='dashed', linewidth=1, label=f"Uniform Mean: {np.mean(uniform_bookings_bus_list):.2f}")
-    plt.title('Monte Carlo Simulation of Total Business Bookings')
+    plt.hist(bookings_bus_list_dynamic, bins=50, color='green', alpha=0.7, label='Dynamic Pricing')
+    plt.hist(bookings_bus_list_uniform, bins=50, color='blue', alpha=0.7, label='Uniform Pricing')
+    plt.axvline(np.mean(bookings_bus_list_dynamic), color='green', linestyle='dashed', linewidth=1, label=f"Mean Dynamic: {np.mean(bookings_bus_list_dynamic):.2f}")
+    plt.axvline(np.mean(bookings_bus_list_uniform), color='blue', linestyle='dashed', linewidth=1, label=f"Mean Uniform: {np.mean(bookings_bus_list_uniform):.2f}")
+    plt.title('Comparison of Total Business Bookings')
     plt.xlabel('Total Business Bookings')
     plt.ylabel('Frequency')
     plt.legend()
     plt.grid(True)
     plt.show()
-
-    # Average Bookings Over Time with Confidence Intervals - Economy
-    all_bookings_economy_dynamic = np.array(dynamic_bookings_economy_daily_all)
-    all_bookings_economy_uniform = np.array(uniform_bookings_economy_daily_all)
-
+    
+    # Average Bookings Over Time
+    all_bookings_economy_dynamic = np.array(all_bookings_economy_dynamic)
+    all_bookings_business_dynamic = np.array(all_bookings_business_dynamic)
+    all_bookings_economy_uniform = np.array(all_bookings_economy_uniform)
+    all_bookings_business_uniform = np.array(all_bookings_business_uniform)
+    
     mean_bookings_econ_dynamic = np.mean(all_bookings_economy_dynamic, axis=0)
-    lower_bookings_econ_dynamic = np.percentile(all_bookings_economy_dynamic, 2.5, axis=0)
-    upper_bookings_econ_dynamic = np.percentile(all_bookings_economy_dynamic, 97.5, axis=0)
-
-    mean_bookings_econ_uniform = np.mean(all_bookings_economy_uniform, axis=0)
-    lower_bookings_econ_uniform = np.percentile(all_bookings_economy_uniform, 2.5, axis=0)
-    upper_bookings_econ_uniform = np.percentile(all_bookings_economy_uniform, 97.5, axis=0)
-
-    days = np.arange(x_start, 0, -1)
-
-    plt.figure(figsize=(14, 7))
-    plt.plot(days, mean_bookings_econ_dynamic, label='Dynamic Pricing', color='blue')
-    plt.fill_between(days, lower_bookings_econ_dynamic, upper_bookings_econ_dynamic, color='blue', alpha=0.2)
-    plt.plot(days, mean_bookings_econ_uniform, label='Uniform Pricing', color='skyblue')
-    plt.fill_between(days, lower_bookings_econ_uniform, upper_bookings_econ_uniform, color='skyblue', alpha=0.2)
-    plt.xlabel('Days Before Departure')
-    plt.ylabel('Number of Economy Bookings')
-    plt.title('Average Daily Economy Bookings with 95% Confidence Intervals')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # Average Bookings Over Time with Confidence Intervals - Business
-    all_bookings_business_dynamic = np.array(dynamic_bookings_business_daily_all)
-    all_bookings_business_uniform = np.array(uniform_bookings_business_daily_all)
-
     mean_bookings_bus_dynamic = np.mean(all_bookings_business_dynamic, axis=0)
-    lower_bookings_bus_dynamic = np.percentile(all_bookings_business_dynamic, 2.5, axis=0)
-    upper_bookings_bus_dynamic = np.percentile(all_bookings_business_dynamic, 97.5, axis=0)
-
+    mean_bookings_econ_uniform = np.mean(all_bookings_economy_uniform, axis=0)
     mean_bookings_bus_uniform = np.mean(all_bookings_business_uniform, axis=0)
-    lower_bookings_bus_uniform = np.percentile(all_bookings_business_uniform, 2.5, axis=0)
-    upper_bookings_bus_uniform = np.percentile(all_bookings_business_uniform, 97.5, axis=0)
-
+    
+    days = np.arange(x_start, 0, -1)
+    
     plt.figure(figsize=(14, 7))
-    plt.plot(days, mean_bookings_bus_dynamic, label='Dynamic Pricing', color='red')
-    plt.fill_between(days, lower_bookings_bus_dynamic, upper_bookings_bus_dynamic, color='red', alpha=0.2)
-    plt.plot(days, mean_bookings_bus_uniform, label='Uniform Pricing', color='salmon')
-    plt.fill_between(days, lower_bookings_bus_uniform, upper_bookings_bus_uniform, color='salmon', alpha=0.2)
+    plt.plot(days, mean_bookings_econ_dynamic, label='Mean Economy Bookings - Dynamic', color='green')
+    plt.plot(days, mean_bookings_econ_uniform, label='Mean Economy Bookings - Uniform', color='blue')
     plt.xlabel('Days Before Departure')
-    plt.ylabel('Number of Business Bookings')
-    plt.title('Average Daily Business Bookings with 95% Confidence Intervals')
+    plt.ylabel('Number of Bookings')
+    plt.title('Average Daily Economy Bookings Comparison')
     plt.legend()
     plt.grid(True)
     plt.show()
-
-    # Average Prices Over Time
-    all_prices_economy_dynamic = np.array(dynamic_prices_economy_daily_all)
-    all_prices_business_dynamic = np.array(dynamic_prices_business_daily_all)
-
-    all_prices_economy_uniform = np.array(uniform_prices_economy_daily_all)
-    all_prices_business_uniform = np.array(uniform_prices_business_daily_all)
-
-    mean_prices_econ_dynamic = np.mean(all_prices_economy_dynamic, axis=0)
-    mean_prices_econ_uniform = np.mean(all_prices_economy_uniform, axis=0)
-
-    mean_prices_bus_dynamic = np.mean(all_prices_business_dynamic, axis=0)
-    mean_prices_bus_uniform = np.mean(all_prices_business_uniform, axis=0)
-
+    
     plt.figure(figsize=(14, 7))
-    plt.plot(days, mean_prices_econ_dynamic, label='Dynamic Pricing - Economy', color='blue')
-    plt.plot(days, mean_prices_econ_uniform, label='Uniform Pricing - Economy', color='skyblue')
-    plt.plot(days, mean_prices_bus_dynamic, label='Dynamic Pricing - Business', color='red')
-    plt.plot(days, mean_prices_bus_uniform, label='Uniform Pricing - Business', color='salmon')
+    plt.plot(days, mean_bookings_bus_dynamic, label='Mean Business Bookings - Dynamic', color='green')
+    plt.plot(days, mean_bookings_bus_uniform, label='Mean Business Bookings - Uniform', color='blue')
+    plt.xlabel('Days Before Departure')
+    plt.ylabel('Number of Bookings')
+    plt.title('Average Daily Business Bookings Comparison')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    
+    # Average Prices Over Time
+    all_prices_economy_dynamic = np.array(all_prices_economy_dynamic)
+    all_prices_business_dynamic = np.array(all_prices_business_dynamic)
+    all_prices_economy_uniform = np.array(all_prices_economy_uniform)
+    all_prices_business_uniform = np.array(all_prices_business_uniform)
+    
+    mean_prices_econ_dynamic = np.mean(all_prices_economy_dynamic, axis=0)
+    mean_prices_bus_dynamic = np.mean(all_prices_business_dynamic, axis=0)
+    mean_prices_econ_uniform = np.mean(all_prices_economy_uniform, axis=0)
+    mean_prices_bus_uniform = np.mean(all_prices_business_uniform, axis=0)
+    
+    plt.figure(figsize=(14, 7))
+    plt.plot(days, mean_prices_econ_dynamic, label='Mean Economy Price - Dynamic', color='green')
+    plt.plot(days, mean_prices_econ_uniform, label='Mean Economy Price - Uniform', color='blue')
     plt.xlabel('Days Before Departure')
     plt.ylabel('Price ($)')
-    plt.title('Average Daily Prices for Economy and Business Classes')
+    plt.title('Average Daily Economy Prices Comparison')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    
+    plt.figure(figsize=(14, 7))
+    plt.plot(days, mean_prices_bus_dynamic, label='Mean Business Price - Dynamic', color='green')
+    plt.plot(days, mean_prices_bus_uniform, label='Mean Business Price - Uniform', color='blue')
+    plt.xlabel('Days Before Departure')
+    plt.ylabel('Price ($)')
+    plt.title('Average Daily Business Prices Comparison')
     plt.legend()
     plt.grid(True)
     plt.show()
@@ -592,10 +657,14 @@ def main():
     x_start = 30  # Days before departure
     
     # Number of simulations
-    num_simulations = 4000  # Adjust as needed
+    num_simulations = 100
     
-    # Run Monte Carlo simulations
-    results = run_monte_carlo_simulations(
+    # Fixed prices for uniform pricing
+    price_economy_fixed = 70
+    price_business_fixed = 150
+    
+    # Run Monte Carlo simulations for dynamic pricing
+    revenues_dynamic, bookings_econ_list_dynamic, bookings_bus_list_dynamic, all_bookings_economy_dynamic, all_bookings_business_dynamic, all_prices_economy_dynamic, all_prices_business_dynamic = run_monte_carlo_simulations(
         num_simulations=num_simulations,
         params_economy=base_params_economy,
         params_business=base_params_business,
@@ -604,61 +673,56 @@ def main():
         x_start=x_start
     )
     
-    (
-        dynamic_revenues,
-        dynamic_bookings_econ_list,
-        dynamic_bookings_bus_list,
-        dynamic_bookings_economy_daily_all,
-        dynamic_bookings_business_daily_all,
-        dynamic_prices_economy_daily_all,
-        dynamic_prices_business_daily_all,
-        uniform_revenues,
-        uniform_bookings_econ_list,
-        uniform_bookings_bus_list,
-        uniform_bookings_economy_daily_all,
-        uniform_bookings_business_daily_all,
-        uniform_prices_economy_daily_all,
-        uniform_prices_business_daily_all
-    ) = results
+    # Run Monte Carlo simulations for uniform pricing
+    revenues_uniform, bookings_econ_list_uniform, bookings_bus_list_uniform, all_bookings_economy_uniform, all_bookings_business_uniform, all_prices_economy_uniform, all_prices_business_uniform = run_monte_carlo_simulations_uniform_pricing(
+        num_simulations=num_simulations,
+        params_economy=base_params_economy,
+        params_business=base_params_business,
+        capacity_economy=capacity_economy,
+        capacity_business=capacity_business,
+        x_start=x_start,
+        price_economy_fixed=price_economy_fixed,
+        price_business_fixed=price_business_fixed
+    )
     
-    # Plot the Monte Carlo results
-    plot_monte_carlo_results(
-        dynamic_revenues,
-        dynamic_bookings_econ_list,
-        dynamic_bookings_bus_list,
-        dynamic_bookings_economy_daily_all,
-        dynamic_bookings_business_daily_all,
-        dynamic_prices_economy_daily_all,
-        dynamic_prices_business_daily_all,
-        uniform_revenues,
-        uniform_bookings_econ_list,
-        uniform_bookings_bus_list,
-        uniform_bookings_economy_daily_all,
-        uniform_bookings_business_daily_all,
-        uniform_prices_economy_daily_all,
-        uniform_prices_business_daily_all,
+    # Plot the comparison results
+    plot_comparison_results(
+        revenues_dynamic,
+        revenues_uniform,
+        bookings_econ_list_dynamic,
+        bookings_econ_list_uniform,
+        bookings_bus_list_dynamic,
+        bookings_bus_list_uniform,
+        all_bookings_economy_dynamic,
+        all_bookings_economy_uniform,
+        all_bookings_business_dynamic,
+        all_bookings_business_uniform,
+        all_prices_economy_dynamic,
+        all_prices_economy_uniform,
+        all_prices_business_dynamic,
+        all_prices_business_uniform,
         x_start,
         num_simulations
     )
     
     # Summary Statistics
-    print(f"Total Simulations Run: {num_simulations}\n")
+    print("Dynamic Pricing Results:")
+    print(f"Total Simulations Run: {num_simulations}")
+    print(f"Average Total Revenue: ${np.mean(revenues_dynamic):.2f}")
+    print(f"Revenue 95% Confidence Interval: (${np.percentile(revenues_dynamic, 2.5):.2f}, ${np.percentile(revenues_dynamic, 97.5):.2f})")
+    print(f"Average Total Economy Bookings: {np.mean(bookings_econ_list_dynamic):.2f}")
+    print(f"Economy Bookings 95% Confidence Interval: ({np.percentile(bookings_econ_list_dynamic, 2.5):.0f}, {np.percentile(bookings_econ_list_dynamic, 97.5):.0f})")
+    print(f"Average Total Business Bookings: {np.mean(bookings_bus_list_dynamic):.2f}")
+    print(f"Business Bookings 95% Confidence Interval: ({np.percentile(bookings_bus_list_dynamic, 2.5):.0f}, {np.percentile(bookings_bus_list_dynamic, 97.5):.0f})")
     
-    print("=== Dynamic Pricing ===")
-    print(f"Average Total Revenue: ${np.mean(dynamic_revenues):.2f}")
-    print(f"Revenue 95% Confidence Interval: (${np.percentile(dynamic_revenues, 2.5):.2f}, ${np.percentile(dynamic_revenues, 97.5):.2f})")
-    print(f"Average Total Economy Bookings: {np.mean(dynamic_bookings_econ_list):.2f}")
-    print(f"Economy Bookings 95% Confidence Interval: ({np.percentile(dynamic_bookings_econ_list, 2.5):.0f}, {np.percentile(dynamic_bookings_econ_list, 97.5):.0f})")
-    print(f"Average Total Business Bookings: {np.mean(dynamic_bookings_bus_list):.2f}")
-    print(f"Business Bookings 95% Confidence Interval: ({np.percentile(dynamic_bookings_bus_list, 2.5):.0f}, {np.percentile(dynamic_bookings_bus_list, 97.5):.0f})\n")
-    
-    print("=== Uniform Pricing ===")
-    print(f"Average Total Revenue: ${np.mean(uniform_revenues):.2f}")
-    print(f"Revenue 95% Confidence Interval: (${np.percentile(uniform_revenues, 2.5):.2f}, ${np.percentile(uniform_revenues, 97.5):.2f})")
-    print(f"Average Total Economy Bookings: {np.mean(uniform_bookings_econ_list):.2f}")
-    print(f"Economy Bookings 95% Confidence Interval: ({np.percentile(uniform_bookings_econ_list, 2.5):.0f}, {np.percentile(uniform_bookings_econ_list, 97.5):.0f})")
-    print(f"Average Total Business Bookings: {np.mean(uniform_bookings_bus_list):.2f}")
-    print(f"Business Bookings 95% Confidence Interval: ({np.percentile(uniform_bookings_bus_list, 2.5):.0f}, {np.percentile(uniform_bookings_bus_list, 97.5):.0f})")
+    print("\nUniform Pricing Results:")
+    print(f"Total Simulations Run: {num_simulations}")
+    print(f"Average Total Revenue: ${np.mean(revenues_uniform):.2f}")
+    print(f"Revenue 95% Confidence Interval: (${np.percentile(revenues_uniform, 2.5):.2f}, ${np.percentile(revenues_uniform, 97.5):.2f})")
+    print(f"Average Total Economy Bookings: {np.mean(bookings_econ_list_uniform):.2f}")
+    print(f"Economy Bookings 95% Confidence Interval: ({np.percentile(bookings_econ_list_uniform, 2.5):.0f}, {np.percentile(bookings_econ_list_uniform, 97.5):.0f})")
+    print(f"Average Total Business Bookings: {np.mean(bookings_bus_list_uniform):.2f}")
+    print(f"Business Bookings 95% Confidence Interval: ({np.percentile(bookings_bus_list_uniform, 2.5):.0f}, {np.percentile(bookings_bus_list_uniform, 97.5):.0f})")
 
 if __name__ == "__main__":
     main()
